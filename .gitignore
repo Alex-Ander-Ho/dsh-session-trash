@@ -1,0 +1,13 @@
+# Dependencies and build output are never part of this repository.
+node_modules/
+pnpm-lock.yaml
+pnpm-workspace.yaml
+
+# Local and tooling artefacts.
+*.log
+*.bak
+*.bak-*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

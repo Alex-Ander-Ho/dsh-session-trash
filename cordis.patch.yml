@@ -1,0 +1,6 @@
+# Inserts the Session Trash (корзина сессий) row into the current DSH profile.
+# The browser half in ./client.js draws the sidebar entry, the Session-row
+# trash button, and the trash panel.
+- insert:
+    - id: session-trash
+      name: 'dsh-session-trash'
