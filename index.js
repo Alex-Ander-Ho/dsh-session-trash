@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Host half of the DSH Session Cleaner bundle.
  *
  * The browser half (`./client`) owns the sidebar entry, the trash panel, and
@@ -70,8 +70,14 @@ async function deleteStoredSession(ctx, request) {
   }
   if (!SESSION_ID_PATTERN.test(sessionId)) return respond({ ok: false, error: 'invalid-session-id' }, 400);
 
-  const sessions = ctx.get('sessions');
-  if (sessions !== undefined && sessions.get(sessionId) !== undefined) return respond({ ok: false, error: 'session-live' }, 409);
+  // A running turn must not lose its writer mid-flight. An idle Session may stay
+  // attached for the whole application run (agents are kept alive), so liveness
+  // alone is not a reason to refuse: the durable log is what gets deleted, and
+  // an archived Session can never start another turn.
+  const agents = ctx.get('agents');
+  if (agents !== undefined && agents.get(sessionId)?.status === 'running') {
+    return respond({ ok: false, error: 'session-running' }, 409);
+  }
 
   const registry = ctx.get('workspaceRegistry');
   if (registry === undefined) return respond({ ok: false, error: 'registry-unavailable' }, 503);
@@ -81,12 +87,20 @@ async function deleteStoredSession(ctx, request) {
   if (persistence === undefined) return respond({ ok: false, error: 'persistence-unavailable' }, 503);
 
   let directory;
+  let missing = false;
   try {
     const metadata = await persistence.stat(sessionId, { signal: request.signal });
     const location = metadata?.location?.path;
     if (typeof location === 'string' && location !== '') directory = dirname(location);
   } catch (error) {
-    return respond({ ok: false, error: 'session-not-found', message: messageOf(error) }, 404);
+    if (error?.name === 'SessionPersistenceNotFoundError') missing = true;
+    else return respond({ ok: false, error: 'session-not-found', message: messageOf(error) }, 404);
+  }
+  if (missing) {
+    // The log is already gone (an earlier deletion). The client may still hold a
+    // stale row for it, so retire that row the same way a fresh deletion does.
+    emitRemoved(ctx, sessionId);
+    return respond({ ok: true, alreadyGone: true, sessionId });
   }
   if (directory === undefined || basename(directory) !== sessionId) {
     return respond({ ok: false, error: 'unexpected-location' }, 409);
@@ -95,18 +109,40 @@ async function deleteStoredSession(ctx, request) {
   try {
     await rm(directory, { recursive: true, force: true });
   } catch (error) {
-    return respond({ ok: false, error: 'delete-failed', message: messageOf(error) }, 500);
+    // Windows keeps the log and its write lock open for an attached Session.
+    // That is reported separately so the UI can ask for a restart instead of
+    // showing a raw filesystem error.
+    const locked = error?.code === 'EBUSY' || error?.code === 'EPERM' || error?.code === 'EACCES';
+    return respond({
+      ok: false,
+      error: locked ? 'delete-locked' : 'delete-failed',
+      message: messageOf(error),
+    }, 500);
   }
 
-  try {
-    await registry.unarchiveSession(sessionId);
-    await registry.unpinSession(sessionId);
-  } catch {
-    // Best-effort: the stored log is the authoritative data; stale registry ids
-    // are inert and are dropped on the next successful call.
-  }
-
+  // These two steps keep the sidebar tree honest:
+  // - the id stays archived, so a client row that has not yet refreshed is still
+  //   filtered out of the default tree instead of flashing back in;
+  // - the removal event makes every connected client drop the row right now,
+  //   without waiting for its next full list read.
+  emitRemoved(ctx, sessionId);
   return respond({ ok: true, sessionId });
+}
+
+/**
+ * Retire one Session row in every connected client.
+ *
+ * `api-session/removed` is the allowlisted remote event the Session controller
+ * already listens to, so connected clients delete the row from their list.
+ * @param ctx - host context.
+ * @param sessionId - the Session whose stored log no longer exists.
+ */
+function emitRemoved(ctx, sessionId) {
+  try {
+    ctx.emit('api-session/removed', sessionId);
+  } catch (error) {
+    console.warn('[session-trash] could not emit api-session/removed:', error);
+  }
 }
 
 /**

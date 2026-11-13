@@ -81,6 +81,11 @@ host half (the delete route) loads only on application start.
 
 - Permanent deletion requires the host half. If it did not load, the panel shows
   a warning and archived sessions stay hidden but not erased.
+- A Session stays attached to the Host for the whole application run once it has
+  been opened, so the panel deletes the stored log while the Session is idle
+  instead of refusing it. Only a Session that is actively running a turn is
+  refused. If Windows still reports the files as locked, restart DSH and delete
+  again — cold archived Sessions are always removable.
 - The countdown is stored in browser `localStorage`: clearing site data resets
   the remaining time for already-trashed sessions.
 - The countdown and auto-deletion apply only to sessions trashed **from this

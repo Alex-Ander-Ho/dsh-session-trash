@@ -1,4 +1,4 @@
-﻿window.__ModuleLoader__.load({
+window.__ModuleLoader__.load({
   id: 'dsh-session-trash',
   factory(require) {
     const React = require('react');
@@ -111,6 +111,8 @@
       archiveFailedToast: '无法移入回收站：{message}',
       unarchiveFailedToast: '无法恢复会话：{message}',
       deleteFailedToast: '无法删除会话：{message}',
+      deleteLockedToast: '会话文件被 DSH 占用：请重启 DSH 后再删除',
+      sessionRunningToast: '会话仍在运行：请先停止它再删除',
       deleteUnavailableToast: '永久删除不可用：插件的主机端没有加载',
       storageFailedToast: '浏览器存储不可用，倒计时将在重新载入后重置',
     };
@@ -160,6 +162,8 @@
       archiveFailedToast: 'Could not move to the trash: {message}',
       unarchiveFailedToast: 'Could not restore the session: {message}',
       deleteFailedToast: 'Could not delete the session: {message}',
+      deleteLockedToast: 'DSH still holds these session files: restart DSH and delete again',
+      sessionRunningToast: 'The session is still running: stop it before deleting',
       deleteUnavailableToast: 'Permanent deletion is unavailable: the plugin host half is not loaded',
       storageFailedToast: 'Browser storage is unavailable; countdowns reset on reload',
     };
@@ -209,6 +213,8 @@
       archiveFailedToast: 'Не удалось убрать в корзину: {message}',
       unarchiveFailedToast: 'Не удалось восстановить сессию: {message}',
       deleteFailedToast: 'Не удалось удалить сессию: {message}',
+      deleteLockedToast: 'Файлы сессии заняты работающим DSH: перезапустите DSH и повторите удаление',
+      sessionRunningToast: 'Сессия ещё выполняется: остановите её перед удалением',
       deleteUnavailableToast: 'Постоянное удаление недоступно: хост-часть плагина не загружена',
       storageFailedToast: 'Хранилище браузера недоступно, отсчёт сбросится после перезагрузки',
     };
@@ -365,16 +371,9 @@
         }
         if (payload !== null && payload.ok === true) return { ok: true };
         if (payload !== null && typeof payload.error === 'string') {
-          // A log that is already gone needs no further deletion: dropping the
-          // archive entry is all that remains.
-          if (payload.error === 'session-not-found') {
-            try {
-              await workspaces.unarchiveSession(sessionId);
-            } catch {
-              // The entry is stale either way; the next feed frame settles it.
-            }
-            return { ok: true, alreadyGone: true };
-          }
+          // A log that is already gone needs no further deletion; the host also
+          // retired the stale client row, so there is nothing left to clean up.
+          if (payload.error === 'session-not-found') return { ok: true, alreadyGone: true };
           return { ok: false, error: payload.error, message: payload.message };
         }
         // No JSON body means this Harness has no delete route registered yet.
@@ -468,6 +467,10 @@
         const archivedSet = useMemo(() => new Set(archivedIds), [archivedIds]);
         const byId = sessionSnapshot.byId;
         const orderedIds = sessionSnapshot.ids;
+        // Archived ids whose Session the list still knows. An erased log leaves a
+        // stale archived id behind, and such an id must not surface as a phantom
+        // trash row or keep a countdown running.
+        const trashKnownIds = useMemo(() => archivedIds.filter((id) => byId[id] !== undefined), [archivedIds, byId]);
 
         const [selected, setSelected] = useState(() => new Set());
         const [trashSelected, setTrashSelected] = useState(() => new Set());
@@ -484,6 +487,14 @@
             if (unavailableNotified.current) return;
             unavailableNotified.current = true;
             notify(t('deleteUnavailableToast'), 'error');
+            return;
+          }
+          if (result.error === 'delete-locked' || result.error === 'session-live') {
+            notify(t('deleteLockedToast'), 'error');
+            return;
+          }
+          if (result.error === 'session-running') {
+            notify(t('sessionRunningToast'), 'error');
             return;
           }
           notify(t('deleteFailedToast', { message: result.message ?? result.error }), 'error');
@@ -512,7 +523,7 @@
         }, [archivedIds]);
 
         useEffect(() => {
-          const due = archivedIds.filter((id) => {
+          const due = trashKnownIds.filter((id) => {
             const at = timestamps[id];
             return at !== undefined && at + AUTO_DELETE_MS <= now && !sweeping.current.has(id);
           });
@@ -541,7 +552,9 @@
 
         const summaries = orderedIds.filter((id) => byId[id] !== undefined && byId[id].origin !== 'subagent' && byId[id].blank !== true);
         const visibleIds = summaries.filter((id) => !archivedSet.has(id));
-        const trashRows = archivedIds.map((id) => ({ id, summary: byId[id] }));
+        // Only rows the Session list still knows can be shown: an archived id
+        // whose log was already erased has no row to restore or delete.
+        const trashRows = trashKnownIds.map((id) => ({ id, summary: byId[id] }));
         const trashCount = trashRows.length;
 
         const summaryOf = (id) => byId[id];
@@ -669,7 +682,7 @@
             text: t('confirmClearTrashText', { count: trashCount }),
             confirmLabel: t('confirm'),
             danger: true,
-            action: () => void deleteIds(archivedIds.slice()),
+            action: () => void deleteIds(trashRows.map((row) => row.id)),
           });
         };
 
@@ -717,7 +730,7 @@
         };
 
         const toggleTrashSelectAll = () => {
-          setTrashSelected((previous) => (previous.size === trashCount ? new Set() : new Set(archivedIds)));
+          setTrashSelected((previous) => (previous.size === trashCount ? new Set() : new Set(trashRows.map((row) => row.id))));
         };
 
         const phase = sessionSnapshot.phase;
